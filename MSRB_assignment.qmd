@@ -1,1 +1,371 @@
-# grant was here
+---
+title: "MSRB Assignment - Part 1 and 2"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    number-sections: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Overview
+
+This report completes **Part 1** of the MSRB assignment. The goal is to connect to WRDS, locate the MSRB database, identify the relevant trade table, inspect its columns, and explain two key variables: `trade_type_indicator` and `dated_date`.
+
+## Setup
+
+```{r}
+library(tidyverse)
+library(dbplyr)
+library(connections)
+library(RPostgres)
+library(stringr)
+library(knitr)
+library(lubridate)
+```
+```{r}
+#| include: false
+
+wrds_user <- Sys.getenv("WRDS_USER")
+wrds_password <- Sys.getenv("WRDS_PASSWORD")
+wrds_ready <- wrds_user != "" && wrds_password != ""
+```
+
+```{r}
+if (wrds_ready) {
+  wrds_con <- connection_open(
+    RPostgres::Postgres(),
+    host = "wrds-pgdata.wharton.upenn.edu",
+    port = 9737,
+    dbname = "wrds",
+    sslmode = "require",
+    user = wrds_user,
+    password = wrds_password
+  )
+  
+  cat("Connected to WRDS successfully.\n")
+} else {
+  stop("WRDS credentials not found. Set WRDS_USER and WRDS_PASSWORD in the R console, then render again.")
+}
+```
+```{r}
+all_tables <- tbl(wrds_con, I("information_schema.tables")) |>
+  filter(table_type %in% c("BASE TABLE", "VIEW", "FOREIGN TABLE")) |>
+  distinct(table_schema, table_name, table_type) |>
+  collect()
+
+msrb_tables <- all_tables |>
+  filter(str_detect(str_to_lower(table_schema), "msrb"))
+
+msrb_tables
+```
+
+```{r}
+all_columns <- tbl(wrds_con, I("information_schema.columns")) |>
+  select(table_schema, table_name, column_name) |>
+  collect()
+
+msrb_columns <- all_columns |>
+  filter(str_detect(str_to_lower(table_schema), "msrb"))
+
+msrb_columns |> head(50)
+```
+
+```{r}
+target_fields <- c(
+  "trade_type_indicator",
+  "dated_date",
+  "cusip",
+  "security_description"
+)
+
+table_score <- msrb_columns |>
+  mutate(column_name_lower = str_to_lower(column_name)) |>
+  filter(column_name_lower %in% target_fields) |>
+  count(table_schema, table_name, sort = TRUE)
+
+table_score
+```
+
+```{r}
+chosen_schema <- table_score$table_schema[1]
+chosen_table  <- table_score$table_name[1]
+
+cat("Chosen schema:", chosen_schema, "\n")
+cat("Chosen table :", chosen_table, "\n")
+```
+```{r}
+trade_tbl <- tbl(wrds_con, in_schema(chosen_schema, chosen_table))
+
+trade_tbl
+```
+
+```{r}
+chosen_columns <- msrb_columns |>
+  filter(table_schema == chosen_schema, table_name == chosen_table) |>
+  arrange(column_name)
+
+chosen_columns
+```
+```{r}
+trade_tbl |>
+  select(any_of(c(
+    "cusip",
+    "security_description",
+    "trade_type_indicator",
+    "dated_date"
+  ))) |>
+  head(10) |>
+  collect()
+```
+
+What does trade_type_indicator represent?
+
+The trade_type_indicator variable represents the type of trade. Specifically, it indicates whether the transaction is:
+
+D = an inter-dealer trade
+
+P = a purchase from a customer by a dealer
+
+S = a sale to a customer by a dealer
+
+The format is one character. This variable is important because it tells us the nature of the trade and whether the transaction occurred between dealers or involved a customer.
+
+What is dated_date, and how is it related to the bond's issue date?
+
+DATED DATE is the date from which interest on a new issue of municipal securities typically starts to accrue. This date is often used to identify a particular series of bonds of an issuer.
+
+It is related to the bond’s issue date because both refer to the beginning of a bond’s life as a newly issued security. However, dated_date is more specifically tied to when interest begins accruing, while the issue date refers more broadly to when the bond is issued. In many cases the two dates may be close or even the same, but conceptually the dated_date is the date used for interest accrual and bond-series identification.
+
+```{r}
+trade_tbl <- tbl(wrds_con, in_schema("msrb", "msrb"))
+
+trade_tbl
+```
+
+```{r}
+cutoff_date <- Sys.Date() %m-% years(5)
+
+cutoff_date
+```
+
+```{r}
+recent_bonds_db <- trade_tbl |>
+  filter(dated_date >= cutoff_date)
+```
+
+```{r}
+recent_overview <- recent_bonds_db |>
+  summarise(
+    rows = n(),
+    min_dated_date = min(dated_date, na.rm = TRUE),
+    max_dated_date = max(dated_date, na.rm = TRUE),
+    min_trade_date = min(trade_date, na.rm = TRUE),
+    max_trade_date = max(trade_date, na.rm = TRUE)
+  ) |>
+  collect()
+
+recent_overview
+```
+
+```{r}
+recent_trade_types <- recent_bonds_db |>
+  distinct(trade_type_indicator) |>
+  arrange(trade_type_indicator) |>
+  collect()
+
+recent_trade_types
+```
+
+```{r}
+par_examples <- recent_bonds_db |>
+  select(par_traded) |>
+  distinct() |>
+  head(20) |>
+  collect()
+
+par_examples
+```
+
+```{r}
+recent_bonds_clean_db <- recent_bonds_db |>
+  mutate(
+    par_masked = sql("
+      CASE
+        WHEN par_traded ILIKE '%MM+%' THEN 1
+        ELSE 0
+      END
+    "),
+    par_traded_num = sql("
+      CASE
+        WHEN par_traded ILIKE '%MM+%' THEN NULL
+        ELSE NULLIF(regexp_replace(par_traded, '[^0-9.]', '', 'g'), '')::numeric
+      END
+    "),
+    maturity_term_years = sql("(maturity_date - dated_date) / 365.25")
+  ) |>
+  select(
+    cusip,
+    security_description,
+    trade_type_indicator,
+    dated_date,
+    coupon,
+    maturity_date,
+    trade_date,
+    par_traded,
+    par_masked,
+    par_traded_num,
+    dollar_price,
+    yield,
+    maturity_term_years
+  )
+```
+
+```{r}
+volume_check <- recent_bonds_clean_db |>
+  summarise(
+    total_trades = n(),
+    masked_trades = sum(par_masked, na.rm = TRUE),
+    pct_masked = 100 * mean(par_masked, na.rm = TRUE)
+  ) |>
+  collect()
+
+volume_check
+```
+
+```{r}
+trade_type_summary <- recent_bonds_clean_db |>
+  group_by(trade_type_indicator) |>
+  summarise(
+    trades = n(),
+    avg_yield = mean(yield, na.rm = TRUE),
+    avg_coupon = mean(coupon, na.rm = TRUE),
+    avg_price = mean(dollar_price, na.rm = TRUE),
+    total_par = sum(par_traded_num, na.rm = TRUE),
+    avg_maturity_term = mean(maturity_term_years, na.rm = TRUE),
+    masked_volume_trades = sum(par_masked, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(trades)) |>
+  collect()
+
+trade_type_summary
+```
+
+```{r}
+issue_summary_db <- recent_bonds_clean_db |>
+  group_by(
+    cusip,
+    security_description,
+    trade_type_indicator,
+    dated_date,
+    maturity_date
+  ) |>
+  summarise(
+    trades = n(),
+    avg_yield = mean(yield, na.rm = TRUE),
+    avg_coupon = mean(coupon, na.rm = TRUE),
+    avg_price = mean(dollar_price, na.rm = TRUE),
+    sd_price = sd(dollar_price, na.rm = TRUE),
+    total_par = sum(par_traded_num, na.rm = TRUE),
+    maturity_term_years = mean(maturity_term_years, na.rm = TRUE),
+    masked_volume_trades = sum(par_masked, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+top_volume_issues <- issue_summary_db |>
+  arrange(desc(total_par)) |>
+  head(20) |>
+  collect()
+
+top_volume_issues
+```
+
+```{r}
+top_yield_issues <- issue_summary_db |>
+  filter(!is.na(avg_yield)) |>
+  arrange(desc(avg_yield)) |>
+  head(20) |>
+  collect()
+
+top_yield_issues
+```
+```{r}
+top_volatility_issues <- issue_summary_db |>
+  filter(!is.na(sd_price)) |>
+  arrange(desc(sd_price)) |>
+  head(20) |>
+  collect()
+
+top_volatility_issues
+```
+
+```{r}
+ggplot(trade_type_summary, aes(x = trade_type_indicator, y = trades, fill = trade_type_indicator)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Number of Trades by Trade Type",
+    x = "Trade Type Indicator",
+    y = "Trade Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+top_volume_issues_100 <- issue_summary_db |>
+  filter(!is.na(avg_yield), !is.na(maturity_term_years), !is.na(total_par)) |>
+  arrange(desc(total_par)) |>
+  head(100) |>
+  collect()
+
+ggplot(
+  top_volume_issues_100,
+  aes(
+    x = maturity_term_years,
+    y = avg_yield,
+    size = total_par,
+    color = trade_type_indicator
+  )
+) +
+  geom_point(alpha = 0.6, position = position_jitter(width = 0.3, height = 0.02)) +
+  scale_size_continuous(labels = scales::comma) +
+  labs(
+    title = "Yield vs. Maturity for Top 100 High-Volume Recent Issues",
+    x = "Maturity Term (Years)",
+    y = "Average Yield",
+    size = "Total Par Traded",
+    color = "Trade Type"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(
+  top_volatility_issues,
+  aes(x = reorder(cusip, sd_price), y = sd_price)
+) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Most Price-Volatile Recent Bond Issues",
+    x = "CUSIP",
+    y = "Price Standard Deviation"
+  ) +
+  theme_minimal()
+```
+
+# Analyst Insights
+
+And write 2–3 paragraphs that:
+
+summarize the main trade-type and maturity/yield patterns
+
+identify at least one anomaly
+
+give a hypothesis for why those bonds differ
