@@ -51,6 +51,9 @@ if (wrds_ready) {
   stop("WRDS credentials not found. Set WRDS_USER and WRDS_PASSWORD in the R console, then render again.")
 }
 ```
+
+## Initial Exploration
+
 ```{r}
 all_tables <- tbl(wrds_con, I("information_schema.tables")) |>
   filter(table_type %in% c("BASE TABLE", "VIEW", "FOREIGN TABLE")) |>
@@ -97,6 +100,7 @@ chosen_table  <- table_score$table_name[1]
 cat("Chosen schema:", chosen_schema, "\n")
 cat("Chosen table :", chosen_table, "\n")
 ```
+
 ```{r}
 trade_tbl <- tbl(wrds_con, in_schema(chosen_schema, chosen_table))
 
@@ -139,6 +143,8 @@ What is dated_date, and how is it related to the bond's issue date?
 DATED DATE is the date from which interest on a new issue of municipal securities typically starts to accrue. This date is often used to identify a particular series of bonds of an issuer.
 
 It is related to the bond’s issue date because both refer to the beginning of a bond’s life as a newly issued security. However, dated_date is more specifically tied to when interest begins accruing, while the issue date refers more broadly to when the bond is issued. In many cases the two dates may be close or even the same, but conceptually the dated_date is the date used for interest accrual and bond-series identification.
+
+## Analytical Exploration
 
 ```{r}
 trade_tbl <- tbl(wrds_con, in_schema("msrb", "msrb"))
@@ -295,6 +301,7 @@ top_yield_issues <- issue_summary_db |>
 
 top_yield_issues
 ```
+
 ```{r}
 top_volatility_issues <- issue_summary_db |>
   filter(!is.na(sd_price)) |>
@@ -304,6 +311,22 @@ top_volatility_issues <- issue_summary_db |>
 
 top_volatility_issues
 ```
+
+```{r}
+analysis_sample <- recent_bonds_clean_db |>
+  filter(
+    !is.na(coupon),
+    !is.na(dollar_price),
+    !is.na(maturity_term_years)
+  ) |>
+  collect()
+
+glimpse(analysis_sample)
+summary(analysis_sample[, c("coupon", "dollar_price", "maturity_term_years", "yield", "par_traded_num")])
+```
+Store in local memory.
+
+## Visualizations
 
 ```{r}
 ggplot(trade_type_summary, aes(x = trade_type_indicator, y = trades, fill = trade_type_indicator)) +
@@ -360,7 +383,146 @@ ggplot(
   theme_minimal()
 ```
 
-# Analyst Insights
+```{r}
+ggplot(analysis_sample, aes(x = coupon)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Coupon Rates for Municipal Bonds Issued in the Last 5 Years",
+    x = "Coupon Rate",
+    y = "Number of Trades"
+  ) +
+  theme_minimal()
+```
+Histogram showing where coupon rates are concentrated across trades. Can help identify whether coupon rates cluster around a few common issuance levels.
+
+```{r}
+ggplot(analysis_sample, aes(x = maturity_term_years)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Maturity Terms",
+    x = "Maturity Term (Years)",
+    y = "Number of Trades"
+  ) +
+  theme_minimal()
+```
+Chart showing the maturity profile. Can help reveal whether the sample is dominated by shorter-, intermediate-, or longer-term bonds.
+
+```{r}
+ggplot(analysis_sample, aes(x = dollar_price)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Municipal Bond Prices",
+    x = "Dollar Price",
+    y = "Number of Trades"
+  ) +
+  theme_minimal()
+```
+Histogram showing how prices are distributed. Can help identify whether most trades occur near par or whether there is substantial dispersion above and below par.
+
+```{r}
+ggplot(analysis_sample, aes(x = coupon, y = dollar_price)) +
+  geom_point(alpha = 0.35) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Bond Price vs. Coupon Rate",
+    x = "Coupon Rate",
+    y = "Dollar Price"
+  ) +
+  theme_minimal()
+```
+Scatterplot examining whether higher-coupon bonds tend to trade at higher prices. Fitted line on scatterplot makes the relationship easier to interpret visually.
+
+```{r}
+ggplot(analysis_sample, aes(x = maturity_term_years, y = dollar_price)) +
+  geom_point(alpha = 0.35) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(
+    title = "Bond Price vs. Maturity Term",
+    x = "Maturity Term (Years)",
+    y = "Dollar Price"
+  ) +
+  theme_minimal()
+```
+Plot comparing how prices vary with maturity. Can help show whether longer-term bonds trade at systematically different prices than shorter-term bonds.
+
+```{r}
+analysis_sample <- analysis_sample |>
+  mutate(
+    maturity_bucket = case_when(
+      maturity_term_years < 5 ~ "Short (<5 years)",
+      maturity_term_years < 15 ~ "Intermediate (5-15 years)",
+      TRUE ~ "Long (15+ years)"
+    )
+  )
+
+coupon_maturity_summary <- analysis_sample |>
+  group_by(maturity_bucket) |>
+  summarise(
+    trades = n(),
+    avg_coupon = mean(coupon, na.rm = TRUE),
+    avg_price = mean(dollar_price, na.rm = TRUE),
+    avg_yield = mean(yield, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+coupon_maturity_summary
+```
+Grouping bonds into maturity buckets to compare average coupon, price, yield, and trade counts across them. Can help summarize structural differences by term.
+
+```{r}
+ggplot(analysis_sample, aes(x = trade_type_indicator, y = dollar_price, fill = trade_type_indicator)) +
+  geom_boxplot() +
+  labs(
+    title = "Dollar Price by Trade Type",
+    x = "Trade Type Indicator",
+    y = "Dollar Price"
+  ) +
+  theme_minimal()
+```
+Boxplot compareing price distribution across trade types. Can help show whether certain trade categories show wider dispersion or different median pricing.
+
+```{r}
+ggplot(
+  analysis_sample |> filter(!is.na(yield)),
+  aes(x = trade_type_indicator, y = yield, fill = trade_type_indicator)
+) +
+  geom_boxplot() +
+  labs(
+    title = "Yield Distribution by Trade Type",
+    x = "Trade Type Indicator",
+    y = "Yield"
+  ) +
+  theme_minimal()
+```
+Chart comparing yield across trade types. Can help reveal whether dealer-customer transactions differ from inter-dealer trades in pricing or yield outcomes.
+
+```{r}
+issue_summary_local <- issue_summary_db |>
+  collect()
+
+ggplot(
+  issue_summary_local |> filter(!is.na(sd_price), !is.na(trades)),
+  aes(x = trades, y = sd_price)
+) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Issue-Level Price Volatility vs. Number of Trades",
+    x = "Number of Trades",
+    y = "Price Standard Deviation"
+  ) +
+  theme_minimal()
+```
+Plot examining whether more frequently traded issues also exhibit greater price volatility. Can help connect trading activity with dispersion in observed prices.
+
+```{r}
+analysis_sample |>
+  select(coupon, dollar_price, maturity_term_years, yield, par_traded_num) |>
+  cor(use = "complete.obs")
+```
+Table summarizing linear relationships among coupon, price, maturity, yield, and trade size. Can help provide a compact way to discuss how these variables move together in the sample.
+
+## Analytical Insights
 
 And write 2–3 paragraphs that:
 
