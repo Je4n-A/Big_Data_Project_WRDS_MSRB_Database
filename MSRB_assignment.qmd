@@ -1,6 +1,6 @@
 ---
 title: "Municipal Bond Market Under the Microscope: An MSRB Data Deep-Dive"
-author: "MSRB Assignment"
+author: "Group 8"
 date: today
 format:
   html:
