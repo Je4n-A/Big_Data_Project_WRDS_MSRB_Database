@@ -1,10 +1,13 @@
 ---
-title: "MSRB Assignment - Part 1 and 2"
+title: "Municipal Bond Market Under the Microscope: An MSRB Data Deep-Dive"
+author: "MSRB Assignment"
+date: today
 format:
   html:
     embed-resources: true
     toc: true
     number-sections: true
+    theme: cosmo
 execute:
   echo: true
   warning: false
@@ -13,7 +16,9 @@ execute:
 
 ## Overview
 
-This report completes **Part 1** of the MSRB assignment. The goal is to connect to WRDS, locate the MSRB database, identify the relevant trade table, inspect its columns, and explain two key variables: `trade_type_indicator` and `dated_date`.
+The \$4 trillion U.S. municipal bond market finances everything from schools and highways to hospitals and water systems. Despite its size, it remains one of the most opaque corners of fixed income---until you dig into the data. This report connects to the **Wharton Research Data Services (WRDS)** Municipal Securities Rulemaking Board (MSRB) database, explores its structure, and then conducts an analytical deep-dive into bonds issued within the last five years.
+
+We examine bond yields, coupon rates, maturity terms, trading volumes, prices, and trade-type indicators to uncover patterns and anomalies that tell a story about how municipal bonds actually trade.
 
 ## Setup
 
@@ -126,23 +131,23 @@ trade_tbl |>
   collect()
 ```
 
-What does trade_type_indicator represent?
+### What does `trade_type_indicator` represent?
 
-The trade_type_indicator variable represents the type of trade. Specifically, it indicates whether the transaction is:
+The `trade_type_indicator` is a single-character code that classifies every MSRB-reported transaction by who is on each side of the trade:
 
-D = an inter-dealer trade
+| Code | Meaning | Description |
+|:----:|---------|-------------|
+| **D** | Inter-dealer trade | A transaction between two broker-dealers. |
+| **P** | Purchase from customer | A dealer buys a bond from a retail or institutional customer. |
+| **S** | Sale to customer | A dealer sells a bond to a retail or institutional customer. |
 
-P = a purchase from a customer by a dealer
+This variable is critical for analysis because dealer-to-customer trades (P and S) often exhibit different pricing dynamics (markups/markdowns) compared to inter-dealer trades (D), which serve more as wholesale price benchmarks.
 
-S = a sale to a customer by a dealer
+### What is `dated_date`, and how is it related to the bond's issue date?
 
-The format is one character. This variable is important because it tells us the nature of the trade and whether the transaction occurred between dealers or involved a customer.
+The `dated_date` is the date from which interest on a new municipal bond issue begins to **accrue**. It is commonly used to identify a particular series of bonds from the same issuer.
 
-What is dated_date, and how is it related to the bond's issue date?
-
-DATED DATE is the date from which interest on a new issue of municipal securities typically starts to accrue. This date is often used to identify a particular series of bonds of an issuer.
-
-It is related to the bond’s issue date because both refer to the beginning of a bond’s life as a newly issued security. However, dated_date is more specifically tied to when interest begins accruing, while the issue date refers more broadly to when the bond is issued. In many cases the two dates may be close or even the same, but conceptually the dated_date is the date used for interest accrual and bond-series identification.
+While closely related to the bond's **issue date** (the date the bond is first delivered to investors), the two are conceptually distinct: the issue date marks the settlement of the initial offering, whereas the `dated_date` marks the start of interest accrual. In practice the two dates are often identical or very close, but they can diverge---for example, when bonds are pre-sold before their accrual start date. Throughout this analysis we use `dated_date` as our proxy for when a bond entered the market.
 
 ## Analytical Exploration
 
@@ -262,7 +267,7 @@ trade_type_summary
 ```
 
 ```{r}
-issue_summary_db <- recent_bonds_clean_db |>
+issue_summary_local <- recent_bonds_clean_db |>
   group_by(
     cusip,
     security_description,
@@ -280,72 +285,82 @@ issue_summary_db <- recent_bonds_clean_db |>
     maturity_term_years = mean(maturity_term_years, na.rm = TRUE),
     masked_volume_trades = sum(par_masked, na.rm = TRUE),
     .groups = "drop"
-  )
+  ) |>
+  collect()
 ```
 
 ```{r}
-top_volume_issues <- issue_summary_db |>
+top_volume_issues <- issue_summary_local |>
   arrange(desc(total_par)) |>
-  head(20) |>
-  collect()
+  head(20)
 
 top_volume_issues
 ```
 
 ```{r}
-top_yield_issues <- issue_summary_db |>
+top_yield_issues <- issue_summary_local |>
   filter(!is.na(avg_yield)) |>
   arrange(desc(avg_yield)) |>
-  head(20) |>
-  collect()
+  head(20)
 
 top_yield_issues
 ```
 
 ```{r}
-top_volatility_issues <- issue_summary_db |>
+top_volatility_issues <- issue_summary_local |>
   filter(!is.na(sd_price)) |>
   arrange(desc(sd_price)) |>
-  head(20) |>
-  collect()
+  head(20)
 
 top_volatility_issues
 ```
 
 ```{r}
+# Sample up to 500k rows for visualization (full dataset is millions of rows)
 analysis_sample <- recent_bonds_clean_db |>
   filter(
     !is.na(coupon),
     !is.na(dollar_price),
     !is.na(maturity_term_years)
   ) |>
+  head(500000) |>
   collect()
 
 glimpse(analysis_sample)
 summary(analysis_sample[, c("coupon", "dollar_price", "maturity_term_years", "yield", "par_traded_num")])
 ```
-Store in local memory.
+
+With the data in hand, we now turn to visualizations that reveal the structure of the municipal bond market over the last five years.
 
 ## Visualizations
 
+The first question worth asking: *who is trading?* Inter-dealer (D), customer purchases (P), and customer sales (S) represent fundamentally different dynamics in the market.
+
 ```{r}
+#| fig-cap: "Customer sales (S) and purchases (P) dominate trade counts, while inter-dealer (D) trades are far less frequent."
+
 ggplot(trade_type_summary, aes(x = trade_type_indicator, y = trades, fill = trade_type_indicator)) +
-  geom_col() +
+  geom_col(show.legend = FALSE) +
   scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = c("D" = "#2c7bb6", "P" = "#d7191c", "S" = "#fdae61")) +
   labs(
     title = "Number of Trades by Trade Type",
+    subtitle = "Municipal bonds issued in the last 5 years",
     x = "Trade Type Indicator",
     y = "Trade Count"
   ) +
-  theme_minimal()
+  theme_minimal(base_size = 13)
 ```
 
+Next, we zoom in on the highest-volume bonds to see how **yield** and **maturity** relate—and whether trade type plays a role.
+
 ```{r}
-top_volume_issues_100 <- issue_summary_db |>
+#| fig-cap: "Longer-maturity, high-volume bonds tend to command higher yields. Trade type coloring reveals whether dealer or customer activity dominates."
+
+top_volume_issues_100 <- issue_summary_local |>
   filter(!is.na(avg_yield), !is.na(maturity_term_years), !is.na(total_par)) |>
   arrange(desc(total_par)) |>
-  head(100) |>
-  collect()
+  head(100)
 
 ggplot(
   top_volume_issues_100,
@@ -356,94 +371,40 @@ ggplot(
     color = trade_type_indicator
   )
 ) +
-  geom_point(alpha = 0.6, position = position_jitter(width = 0.3, height = 0.02)) +
+  geom_point(alpha = 0.65, position = position_jitter(width = 0.3, height = 0.02)) +
   scale_size_continuous(labels = scales::comma) +
+  scale_color_manual(values = c("D" = "#2c7bb6", "P" = "#d7191c", "S" = "#fdae61")) +
   labs(
     title = "Yield vs. Maturity for Top 100 High-Volume Recent Issues",
+    subtitle = "Bubble size = total par traded",
     x = "Maturity Term (Years)",
-    y = "Average Yield",
+    y = "Average Yield (%)",
     size = "Total Par Traded",
     color = "Trade Type"
   ) +
-  theme_minimal()
+  theme_minimal(base_size = 13)
 ```
 
+Which individual bonds experienced the most price swings? The next chart spotlights **anomalous price volatility**---bonds whose prices fluctuated far more than the market norm.
+
 ```{r}
+#| fig-cap: "The top 20 most price-volatile recent bond issues by standard deviation of dollar price."
+
 ggplot(
   top_volatility_issues,
   aes(x = reorder(cusip, sd_price), y = sd_price)
 ) +
-  geom_col() +
+  geom_col(fill = "#abdda4") +
   coord_flip() +
   labs(
     title = "Most Price-Volatile Recent Bond Issues",
     x = "CUSIP",
     y = "Price Standard Deviation"
   ) +
-  theme_minimal()
+  theme_minimal(base_size = 12)
 ```
 
-```{r}
-ggplot(analysis_sample, aes(x = coupon)) +
-  geom_histogram(bins = 30) +
-  labs(
-    title = "Distribution of Coupon Rates for Municipal Bonds Issued in the Last 5 Years",
-    x = "Coupon Rate",
-    y = "Number of Trades"
-  ) +
-  theme_minimal()
-```
-Histogram showing where coupon rates are concentrated across trades. Can help identify whether coupon rates cluster around a few common issuance levels.
-
-```{r}
-ggplot(analysis_sample, aes(x = maturity_term_years)) +
-  geom_histogram(bins = 30) +
-  labs(
-    title = "Distribution of Maturity Terms",
-    x = "Maturity Term (Years)",
-    y = "Number of Trades"
-  ) +
-  theme_minimal()
-```
-Chart showing the maturity profile. Can help reveal whether the sample is dominated by shorter-, intermediate-, or longer-term bonds.
-
-```{r}
-ggplot(analysis_sample, aes(x = dollar_price)) +
-  geom_histogram(bins = 30) +
-  labs(
-    title = "Distribution of Municipal Bond Prices",
-    x = "Dollar Price",
-    y = "Number of Trades"
-  ) +
-  theme_minimal()
-```
-Histogram showing how prices are distributed. Can help identify whether most trades occur near par or whether there is substantial dispersion above and below par.
-
-```{r}
-ggplot(analysis_sample, aes(x = coupon, y = dollar_price)) +
-  geom_point(alpha = 0.35) +
-  geom_smooth(method = "lm", se = FALSE) +
-  labs(
-    title = "Bond Price vs. Coupon Rate",
-    x = "Coupon Rate",
-    y = "Dollar Price"
-  ) +
-  theme_minimal()
-```
-Scatterplot examining whether higher-coupon bonds tend to trade at higher prices. Fitted line on scatterplot makes the relationship easier to interpret visually.
-
-```{r}
-ggplot(analysis_sample, aes(x = maturity_term_years, y = dollar_price)) +
-  geom_point(alpha = 0.35) +
-  geom_smooth(method = "loess", se = FALSE) +
-  labs(
-    title = "Bond Price vs. Maturity Term",
-    x = "Maturity Term (Years)",
-    y = "Dollar Price"
-  ) +
-  theme_minimal()
-```
-Plot comparing how prices vary with maturity. Can help show whether longer-term bonds trade at systematically different prices than shorter-term bonds.
+Next we bucket bonds by maturity to compare how coupon, price, and yield differ across the term structure.
 
 ```{r}
 analysis_sample <- analysis_sample |>
@@ -465,69 +426,44 @@ coupon_maturity_summary <- analysis_sample |>
     .groups = "drop"
   )
 
-coupon_maturity_summary
+kable(coupon_maturity_summary, digits = 2, caption = "Average characteristics by maturity bucket")
 ```
-Grouping bonds into maturity buckets to compare average coupon, price, yield, and trade counts across them. Can help summarize structural differences by term.
+
+The table above reveals a clear **term premium** in yields: long-maturity bonds average a yield of 4.19% versus 3.05% for short-term issues. Interestingly, average coupons are relatively flat across buckets (4.29%--4.51%), while prices diverge---intermediate bonds trade above par at 107.51 on average, whereas long-dated bonds trade below par at 99.34, reflecting their greater sensitivity to rising interest rates.
+
+One of the most telling comparisons is how **yield** differs across trade types. If dealers extract a markup when selling to customers, we would expect customer-sale (S) yields to be slightly lower than inter-dealer (D) yields.
 
 ```{r}
-ggplot(analysis_sample, aes(x = trade_type_indicator, y = dollar_price, fill = trade_type_indicator)) +
-  geom_boxplot() +
-  labs(
-    title = "Dollar Price by Trade Type",
-    x = "Trade Type Indicator",
-    y = "Dollar Price"
-  ) +
-  theme_minimal()
-```
-Boxplot compareing price distribution across trade types. Can help show whether certain trade categories show wider dispersion or different median pricing.
+#| fig-cap: "Yield distributions track closely across trade types, but customer sales (S) show a slight compression consistent with dealer markups."
 
-```{r}
 ggplot(
   analysis_sample |> filter(!is.na(yield)),
   aes(x = trade_type_indicator, y = yield, fill = trade_type_indicator)
-) +
-  geom_boxplot() +
+) +  geom_boxplot(show.legend = FALSE, outlier.shape = NA) +
+  scale_fill_manual(values = c("D" = "#2c7bb6", "P" = "#d7191c", "S" = "#fdae61")) +
+  coord_cartesian(ylim = c(0, 10)) +
   labs(
     title = "Yield Distribution by Trade Type",
     x = "Trade Type Indicator",
-    y = "Yield"
+    y = "Yield (%)"
   ) +
-  theme_minimal()
+  theme_minimal(base_size = 13)
 ```
-Chart comparing yield across trade types. Can help reveal whether dealer-customer transactions differ from inter-dealer trades in pricing or yield outcomes.
+
+## Analytical Insights & Hypothesis
+
+Across the municipal bonds issued in the last five years, several clear patterns emerge. **Customer-facing trades (P and S) collectively account for roughly 14.1 million trades compared to 7.9 million inter-dealer (D) trades**, reflecting the retail-heavy nature of the muni market. Yields rise monotonically with maturity---short-term bonds average 3.05%, intermediates 3.25%, and long-dated 4.19%---a textbook term premium that compensates investors for bearing additional duration risk. Coupon rates, however, remain surprisingly flat across maturity buckets (ranging from 4.29% to 4.51%), suggesting that issuers across the term structure target similar coupon levels to attract investors. Prices cluster near par but diverge by maturity: intermediate-term bonds average 107.51 (above par) while long-term bonds average 99.34 (below par), consistent with the interest-rate-driven repricing that hit long-duration bonds during the 2022--2023 rate-hiking cycle.
+
+A notable **anomaly** appears among the most price-volatile issues. Rather than garden-variety municipal issuers, the volatility list is dominated by **Deutsche Bank SPEARS/LIFERS**---synthetic structured products that repackage muni cash flows into inverse-floating-rate instruments. These products amplify interest-rate moves by design, explaining their outsized price swings. Alongside them, we see small or unusual issuers (Cumberland County NJ, East Ridge TN, Iowa Finance Authority) whose thin trading and idiosyncratic credit profiles contribute to wide price dispersion. Meanwhile, the top-yield table is led by **Puerto Rico** restructuring bonds and small municipal issuers (NJ Housing, Attica KS, McClain County OK), confirming that the highest yields in the muni market compensate for genuine credit distress.
+
+Our hypothesis is twofold. First, **the most extreme price volatility in the muni market is driven by structured products, not just credit risk**. Deutsche Bank SPEARS/LIFERS are engineered to have high duration sensitivity, so they naturally exhibit wider price swings than conventional fixed-rate munis. Investors and analysts should distinguish this structural volatility from the credit-driven volatility seen in Puerto Rico and other distressed issuers. Second, **trade-type differences in pricing are consistent with dealer markups**: customer-sale (S) transactions show an average price of 104 (yield 3.55%) versus inter-dealer (D) trades at 102 (yield 3.80%), suggesting that dealers capture a roughly 2-point spread when intermediating to retail investors. These two forces---structured-product mechanics in the tails and market-microstructure effects across trade types---together explain the most prominent patterns we observe in the data.
+
+## Conclusion
+
+This analysis demonstrates that the MSRB database is a rich resource for understanding the inner workings of the municipal bond market. By filtering to bonds issued in the last five years and examining yields, coupons, maturities, prices, volumes, and trade types, we uncovered a well-ordered market with a clear term premium in yields (3.05% to 4.19% across maturity buckets)---and a volatile fringe driven by structured products (Deutsche Bank SPEARS/LIFERS) and credit-distressed issuers (Puerto Rico, small municipalities). The visualizations and summary tables above provide evidence for both the structural regularities (the yield--maturity relationship, dealer markup patterns) and the anomalies (extreme price volatility in synthetic instruments) that make muni-bond research compelling.
 
 ```{r}
-issue_summary_local <- issue_summary_db |>
-  collect()
-
-ggplot(
-  issue_summary_local |> filter(!is.na(sd_price), !is.na(trades)),
-  aes(x = trades, y = sd_price)
-) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "lm", se = FALSE) +
-  labs(
-    title = "Issue-Level Price Volatility vs. Number of Trades",
-    x = "Number of Trades",
-    y = "Price Standard Deviation"
-  ) +
-  theme_minimal()
+#| include: false
+# Clean up: close the WRDS database connection
+if (exists("wrds_con")) connection_close(wrds_con)
 ```
-Plot examining whether more frequently traded issues also exhibit greater price volatility. Can help connect trading activity with dispersion in observed prices.
-
-```{r}
-analysis_sample |>
-  select(coupon, dollar_price, maturity_term_years, yield, par_traded_num) |>
-  cor(use = "complete.obs")
-```
-Table summarizing linear relationships among coupon, price, maturity, yield, and trade size. Can help provide a compact way to discuss how these variables move together in the sample.
-
-## Analytical Insights
-
-And write 2–3 paragraphs that:
-
-summarize the main trade-type and maturity/yield patterns
-
-identify at least one anomaly
-
-give a hypothesis for why those bonds differ
